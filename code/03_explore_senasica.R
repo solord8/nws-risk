@@ -16,15 +16,17 @@ library(janitor)
 
 #Load data (edit to match your file path)
 data_dir <- "G:/.shortcut-targets-by-id/1sBr0mNtmtJnFm2funklbTepJgKsmnYie/New World Screwworm/datasets"
-nws <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026.csv"))
+
+nws <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026_with_unit_id.csv"))
 
 #Standardizing Data
 
+#Standardize and translate column names, then tidy the remaining names
 std_names <- function(x) {
   lx   <- str_to_lower(x)
   type <- case_when(
     str_starts(lx, "sus")  ~ "suscep",
-    str_starts(lx, "caso") ~ "casos",
+    str_starts(lx, "caso") ~ "cases",
     TRUE                   ~ NA_character_
   )
   stem <- str_remove(lx, "^(suscep|susc|sus|casos|caso)_?")
@@ -32,36 +34,50 @@ std_names <- function(x) {
   if_else(is.na(type), x, str_c(type, "_", host))
 }
 
-# Standardize host columns first, then tidy the remaining names
 nws_std <- nws |>
+  select(-c(Abbrev, ID, fecha_mapa,Fecha_Inic_raw)) |>
   rename_with(std_names) |>
-  janitor::clean_names()
-
-# Check 1: expect 12 host groups, each with a suscep_ and casos_ column
-names(nws_std) |> str_subset("^(suscep|casos)_")
+  janitor::clean_names()  |> 
+  rename(
+    country = pais,
+    adm1 = provincia,
+    adm2 = localidad,
+    lat = latitud,
+    long = longitud,
+    date = fecha_inic,
+    month_year = mapa_omsa,
+    tot_cases = total_caso,
+    total = suma,
+    year = ano
+  )
+  
+# Check 1: expect 12 host groups, each with a suscep_ and cases_ column
+names(nws_std) |> str_subset("^(suscep|cases)_")
 
 # Check 2: host labels should match between the two sets
 hosts_susc  <- names(nws_std) |> str_subset("^suscep_") |> str_remove("^suscep_")
-hosts_casos <- names(nws_std) |> str_subset("^casos_")  |> str_remove("^casos_")
+hosts_casos <- names(nws_std) |> str_subset("^cases_")  |> str_remove("^cases_")
+setdiff(hosts_susc, hosts_casos)   # character(0)
+setdiff(hosts_casos, hosts_susc)   # character(0)
 
 # Check 3: do host columns add up to the total column?
 nws_std |>
-  mutate(host_sum = rowSums(across(starts_with("casos_"), \(x) replace_na(x, 0))),
+  mutate(host_sum = rowSums(across(starts_with("cases_"), \(x) replace_na(x, 0))),
          diff     = host_sum - total_caso) |>
   filter(diff != 0)
 
-# Reshape (tot_suscep and total_caso don't match the pattern, so they're excluded)
+# Reshape (tot_suscep and tot_cases don't match the pattern, so they're excluded)
 nws_long <- nws_std |>
   pivot_longer(
-    cols = matches("^(suscep|casos)_"),
+    cols = matches("^(suscep|cases)_"),
     names_to = c(".value", "host"),
-    names_pattern = "^(suscep|casos)_(.*)$"
+    names_pattern = "^(suscep|cases)_(.*)$"
   ) |>
-  mutate(across(c(suscep, casos), \(x) replace_na(x, 0)))
+  mutate(across(c(suscep, cases), \(x) replace_na(x, 0)))
 
 # Check 4: these should match
-sum(nws_long$casos)
-sum(nws_std$total_caso, na.rm = TRUE)
+sum(nws_long$cases)
+sum(nws_std$tot_cases, na.rm = TRUE)
 
 host_labels <- c(cani = "Canine", equi = "Equine", porc = "Swine", bovi = "Bovine",
                  ovin = "Ovine", capr = "Caprine", feli = "Feline", bufa = "Buffalo",
@@ -74,9 +90,9 @@ nws_long <- nws_long |> mutate(host = unname(host_labels[host]))
 
 # 1. Cases by country ---------------------------------------------------
 nws_long |>
-  group_by(pais) |>                                           
-  summarize(cases = sum(casos)) |>
-  ggplot(aes(reorder(pais, cases), cases)) +
+  group_by(country) |>                                           
+  summarize(cases = sum(cases)) |>
+  ggplot(aes(reorder(country, cases), cases)) +
   geom_col() + coord_flip() +
   labs(x = NULL, y = "Cases")
 ggsave(here("output/figures/cases_by_country.png"), width = 7, height = 5)
@@ -84,7 +100,7 @@ ggsave(here("output/figures/cases_by_country.png"), width = 7, height = 5)
 # 2. Cases by host (all countries) --------------------------------------
 nws_long |>
   group_by(host) |>
-  summarize(cases = sum(casos)) |>
+  summarize(cases = sum(cases)) |>
   ggplot(aes(reorder(host, cases), cases)) +
   geom_col() + coord_flip() +
   labs(x = NULL, y = "Cases")
@@ -92,10 +108,10 @@ ggsave(here("output/figures/cases_by_host.png"), width = 7, height = 5)
 
 # 3. Cases by host within each country ----------------------------------
 nws_long |>
-  group_by(pais, host) |>
-  summarize(cases = sum(casos), .groups = "drop") |>
+  group_by(country, host) |>
+  summarize(cases = sum(cases), .groups = "drop") |>
   ggplot(aes(reorder(host, cases), cases)) +
   geom_col() + coord_flip() +
-  facet_wrap(~pais, scales = "free") +
+  facet_wrap(~country, scales = "free") +
   labs(x = NULL, y = "Cases")
 ggsave(here("output/figures/cases_by_host_by_country.png"), width = 10, height = 7)
