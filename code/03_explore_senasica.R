@@ -17,7 +17,18 @@ library(janitor)
 #Load data (edit to match your file path)
 data_dir <- "G:/.shortcut-targets-by-id/1sBr0mNtmtJnFm2funklbTepJgKsmnYie/New World Screwworm/datasets"
 
+glw <- read_csv(file.path(data_dir, "GLW2020_ADM2_merged.csv"))
 nws <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026_with_unit_id.csv"))
+
+#Collapse glw to country level statistics
+glw_collapsed <- glw |> 
+  select(-c(state,adm_level,unit_id)) |> 
+  rename(
+    country = country_iso3,
+    adm2 = unit_name
+  )
+
+
 
 #Standardizing Data
 
@@ -115,3 +126,12 @@ nws_long |>
   facet_wrap(~country, scales = "free") +
   labs(x = NULL, y = "Cases")
 ggsave(here("output/figures/cases_by_host_by_country.png"), width = 10, height = 7)
+
+# 4. Cases per susceptible animal, by host --------------------
+# Only meaningful if Suscep = animals at risk.
+nws_long |>
+  group_by(host) |>
+  summarize(rate = sum(cases) / sum(suscep)) |>
+  ggplot(aes(reorder(host, rate), rate)) +
+  geom_col() + coord_flip() +
+  labs(x = NULL, y = "Cases per susceptible animal")
