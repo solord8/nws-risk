@@ -17,11 +17,11 @@ library(janitor)
 #Load data (edit to match your file path)
 data_dir <- "G:/.shortcut-targets-by-id/1sBr0mNtmtJnFm2funklbTepJgKsmnYie/New World Screwworm/datasets"
 
-glw <- read_csv(file.path(data_dir, "GLW2020_ADM2_merged.csv"))
-nws <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026_with_unit_id.csv"))
+glw_raw <- read_csv(file.path(data_dir, "GLW2020_ADM2_merged.csv"))
+nws_raw <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026_with_unit_id.csv"))
 
-#Collapse glw to country level statistics
-glw_collapsed <- glw |> 
+#Remove empty rows
+glw_clean <- glw_raw |> 
   select(-c(state,adm_level,unit_id)) |> 
   rename(
     country = country_iso3,
@@ -45,7 +45,7 @@ std_names <- function(x) {
   if_else(is.na(type), x, str_c(type, "_", host))
 }
 
-nws_std <- nws |>
+nws_std <- nws_raw |>
   select(-c(Abbrev, ID, fecha_mapa,Fecha_Inic_raw)) |>
   rename_with(std_names) |>
   janitor::clean_names()  |> 
@@ -74,7 +74,7 @@ setdiff(hosts_casos, hosts_susc)   # character(0)
 # Check 3: do host columns add up to the total column?
 nws_std |>
   mutate(host_sum = rowSums(across(starts_with("cases_"), \(x) replace_na(x, 0))),
-         diff     = host_sum - total_caso) |>
+         diff     = host_sum - tot_cases) |>
   filter(diff != 0)
 
 # Reshape (tot_suscep and tot_cases don't match the pattern, so they're excluded)
@@ -90,6 +90,7 @@ nws_long <- nws_std |>
 sum(nws_long$cases)
 sum(nws_std$tot_cases, na.rm = TRUE)
 
+#Label hosts
 host_labels <- c(cani = "Canine", equi = "Equine", porc = "Swine", bovi = "Bovine",
                  ovin = "Ovine", capr = "Caprine", feli = "Feline", bufa = "Buffalo",
                  cone = "Rabbit", silv = "Wildlife", avesc = "Livestock Birds",
@@ -97,13 +98,17 @@ host_labels <- c(cani = "Canine", equi = "Equine", porc = "Swine", bovi = "Bovin
 
 nws_long <- nws_long |> mutate(host = unname(host_labels[host]))
 
+
 #Figures
+nws_mex <- nws_long |> 
+  group_by(country) |> 
+  summarize(individuals = sum(tot_cases))
 
 # 1. Cases by country ---------------------------------------------------
 nws_long |>
   group_by(country) |>                                           
-  summarize(cases = sum(cases)) |>
-  ggplot(aes(reorder(country, cases), cases)) +
+  summarize(total_cases = sum(tot_cases)) |>
+  ggplot(aes(reorder(country, total_cases), total_cases)) +
   geom_col() + coord_flip() +
   labs(x = NULL, y = "Cases")
 ggsave(here("output/figures/cases_by_country.png"), width = 7, height = 5)
