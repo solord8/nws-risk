@@ -14,25 +14,23 @@ library(tidyverse)
 library(here)
 library(janitor)
 
-#Load data (edit to match your file path)
+#Load raw data (edit to match your file path)
 data_dir <- "G:/.shortcut-targets-by-id/1sBr0mNtmtJnFm2funklbTepJgKsmnYie/New World Screwworm/datasets"
 
 glw_raw <- read_csv(file.path(data_dir, "GLW2020_ADM2_merged.csv"))
 nws_raw <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026_with_unit_id.csv"))
 
-#Remove empty rows
+#Standardizing Data
+
+#Remove empty columns in glw
 glw_clean <- glw_raw |> 
-  select(-c(state,adm_level,unit_id)) |> 
+  select(-c(state,adm_level)) |> 
   rename(
     country = country_iso3,
     adm2 = unit_name
   )
 
-
-
-#Standardizing Data
-
-#Standardize and translate column names, then tidy the remaining names
+#Standardize nws and translate column names, then tidy the remaining names
 std_names <- function(x) {
   lx   <- str_to_lower(x)
   type <- case_when(
@@ -61,6 +59,25 @@ nws_std <- nws_raw |>
     total = suma,
     year = ano
   )
+
+#nws QA/QC
+nws_std |> 
+  filter(lat == 0 | long == 0)
+
+#Find unit_ids in nws that are NOT in glw
+not_in_glw <- nws_std |> 
+  anti_join(glw_clean, by = "unit_id")
+  nrow(not_in_glw)
+  
+#Find unit_ids in glw that are NOT in nws
+not_in_nws <- glw_clean |> 
+  anti_join(nws_std, by = "unit_id")
+  nrow(not_in_nws)
+
+#glw row uniqueness 
+glw_clean |> 
+  count(unit_id, species) |> 
+  filter(n > 1)
   
 # Check 1: expect 12 host groups, each with a suscep_ and cases_ column
 names(nws_std) |> str_subset("^(suscep|cases)_")
@@ -72,9 +89,16 @@ setdiff(hosts_susc, hosts_casos)   # character(0)
 setdiff(hosts_casos, hosts_susc)   # character(0)
 
 # Check 3: do host columns add up to the total column?
+anyNA(nws_std$tot_cases)
 nws_std |>
   mutate(host_sum = rowSums(across(starts_with("cases_"), \(x) replace_na(x, 0))),
          diff     = host_sum - tot_cases) |>
+  filter(diff != 0)
+
+anyNA(nws_std$tot_suscep)
+nws_std |>
+  mutate(host_sum = rowSums(across(starts_with("suscep_"), \(x) replace_na(x, 0))),
+         diff     = host_sum - tot_suscep) |>
   filter(diff != 0)
 
 # Reshape (tot_suscep and tot_cases don't match the pattern, so they're excluded)
@@ -96,19 +120,26 @@ host_labels <- c(cani = "Canine", equi = "Equine", porc = "Swine", bovi = "Bovin
                  cone = "Rabbit", silv = "Wildlife", avesc = "Livestock Birds",
                  avess = "Wild Birds")
 
+#Check for unmapped hosts
+sum(is.na(nws_long$host))
+
 nws_long <- nws_long |> mutate(host = unname(host_labels[host]))
 
-
-#Figures
-nws_mex <- nws_long |> 
+#Sanity checks
+nws_std |> 
   group_by(country) |> 
   summarize(individuals = sum(tot_cases))
+nws_long |> 
+  group_by(host) |> 
+  summarize(affected_indivs = sum(cases))
+
+#Figures
 
 # 1. Cases by country ---------------------------------------------------
 nws_long |>
   group_by(country) |>                                           
-  summarize(total_cases = sum(tot_cases)) |>
-  ggplot(aes(reorder(country, total_cases), total_cases)) +
+  summarize(cases = sum(cases)) |>
+  ggplot(aes(reorder(country, cases), cases)) +
   geom_col() + coord_flip() +
   labs(x = NULL, y = "Cases")
 ggsave(here("output/figures/cases_by_country.png"), width = 7, height = 5)
@@ -140,3 +171,58 @@ nws_long |>
   ggplot(aes(reorder(host, rate), rate)) +
   geom_col() + coord_flip() +
   labs(x = NULL, y = "Cases per susceptible animal")
+ggsave(here("output/figures/cases_per_suscept_animal_by_host.png"), width = 7, height = 5)
+
+# 5. Host preference index --------------------
+
+# Crosswalk: GLW species -> NWS host labels
+glw_xwalk <- c(cattle = "Bovine", buffaloes = "Buffalo", sheep = "Ovine",
+               goats = "Caprine", pigs = "Swine", chickens = "Livestock Birds")
+
+# Top 3 countries by total cases (one row per outbreak table)
+top3 <- nws_std |>
+  group_by(country) |>
+  summarize(total_cases = sum(tot_cases)) |>
+  slice_max(total_cases, n = 3, with_ties = FALSE) |>
+  pull(country)
+
+#Use: % of cases by host, within country (matched hosts only
+use_df <- nws_long |>
+  filter(country %in% top3, host %in% unname(glw_xwalk)) |>
+  group_by(country, host) |>
+  summarize(cases = sum(cases), .groups = "drop") |>
+  group_by(country) |>
+  mutate(use_pct = 100 * cases / sum(cases)) |>
+  ungroup()
+
+#Availability: % of livestock by host, in units that had outbreaks
+unit_country <- nws_std |>
+  filter(!is.na(unit_id)) |>
+  distinct(unit_id, country)            # one row per unit, so no duplication
+
+avail_df <- glw_clean |>
+  select(-country) |>                   # drop ISO3 to avoid country.x / country.y
+  inner_join(unit_country, by = "unit_id") |>
+  filter(country %in% top3) |>
+  mutate(host = unname(glw_xwalk[species])) |>
+  group_by(country, host) |>
+  summarize(abundance = sum(total_count, na.rm = TRUE), .groups = "drop") |>
+  group_by(country) |>
+  mutate(avail_pct = 100 * abundance / sum(abundance)) |>
+  ungroup()
+
+#Combine, compute preference index, plot
+pref_df <- use_df |>
+  inner_join(avail_df, by = c("country", "host")) |>
+  mutate(pref_index = use_pct / avail_pct)
+
+ggplot(pref_df, aes(avail_pct, use_pct, label = host)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(shape = 1, size = 3) +
+  geom_text(vjust = -0.8, size = 3, check_overlap = TRUE) +
+  facet_wrap(~country) +
+  coord_equal(xlim = c(0, 100), ylim = c(0, 100)) +
+  labs(x = "Host availability (% of livestock in outbreak units)",
+       y = "Host use (% of cases)") +
+  theme_bw()
+ggsave(here("output/figures/host_preference_top3.png"), width = 10, height = 4)
