@@ -17,18 +17,29 @@ library(janitor)
 #Load raw data (edit to match your file path)
 data_dir <- "G:/.shortcut-targets-by-id/1sBr0mNtmtJnFm2funklbTepJgKsmnYie/New World Screwworm/datasets"
 
+
 glw_raw <- read_csv(file.path(data_dir, "GLW2020_ADM2_merged.csv"))
+glw_horses_raw <- read_csv(file.path(data_dir, "GLW2010_PAN_ADM2_horses.csv"))
 nws_raw <- read_csv(file.path(data_dir, "SENASICA_NWS_2022_2026_with_unit_id.csv"))
 
 #Standardizing Data
 
-#Remove empty columns in glw
+#Remove empty columns in glw data
 glw_clean <- glw_raw |> 
   select(-c(state,adm_level)) |> 
   rename(
     country = country_iso3,
     adm2 = unit_name
   )
+glw2010_horses <- glw_horses_raw |>
+  select(-c(state, adm_level)) |>
+  rename(country = country_iso3, adm2 = unit_name) |>
+  filter(species == "horses") |>          # check the exact label first
+  mutate(glw_year = 2010)
+
+# Tag the 2020 data, then stack
+glw_clean <- glw_clean |> mutate(glw_year = 2020)
+glw_all   <- bind_rows(glw_clean, glw2010_horses)
 
 #Standardize nws and translate column names, then tidy the remaining names
 std_names <- function(x) {
@@ -66,16 +77,16 @@ nws_std |>
 
 #Find unit_ids in nws that are NOT in glw
 not_in_glw <- nws_std |> 
-  anti_join(glw_clean, by = "unit_id")
+  anti_join(glw_all, by = "unit_id")
   nrow(not_in_glw)
   
 #Find unit_ids in glw that are NOT in nws
-not_in_nws <- glw_clean |> 
+not_in_nws <- glw_all |> 
   anti_join(nws_std, by = "unit_id")
   nrow(not_in_nws)
 
 #glw row uniqueness 
-glw_clean |> 
+glw_all |> 
   count(unit_id, species) |> 
   filter(n > 1)
   
@@ -177,7 +188,8 @@ ggsave(here("output/figures/cases_per_suscept_animal_by_host.png"), width = 7, h
 
 # Crosswalk: GLW species -> NWS host labels
 glw_xwalk <- c(cattle = "Bovine", buffaloes = "Buffalo", sheep = "Ovine",
-               goats = "Caprine", pigs = "Swine", chickens = "Livestock Birds")
+               goats = "Caprine", pigs = "Swine", chickens = "Livestock Birds",
+               horses = "Equine")
 
 # Top 3 countries by total cases (one row per outbreak table)
 top3 <- nws_std |>
@@ -200,7 +212,7 @@ unit_country <- nws_std |>
   filter(!is.na(unit_id)) |>
   distinct(unit_id, country)            # one row per unit, so no duplication
 
-avail_df <- glw_clean |>
+avail_df <- glw_all |>
   select(-country) |>                   # drop ISO3 to avoid country.x / country.y
   inner_join(unit_country, by = "unit_id") |>
   filter(country %in% top3) |>
@@ -217,7 +229,7 @@ pref_df <- use_df |>
   mutate(pref_index = use_pct / avail_pct)
 
 ggplot(pref_df, aes(avail_pct, use_pct, label = host)) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") + 
   geom_point(shape = 1, size = 3) +
   geom_text(vjust = -0.8, size = 3, check_overlap = TRUE) +
   facet_wrap(~country) +
@@ -226,3 +238,84 @@ ggplot(pref_df, aes(avail_pct, use_pct, label = host)) +
        y = "Host use (% of cases)") +
   theme_bw()
 ggsave(here("output/figures/host_preference_top3.png"), width = 10, height = 4)
+
+#6. NWS Preference index By Mammals--------------------
+
+# Hosts to keep (edit this vector to switch scopes later)
+mammal_hosts <- c("Bovine", "Buffalo", "Ovine", "Caprine", "Swine")
+
+# Use: same as before, but filter to mammals before computing percentages
+use_df <- nws_long |>
+  filter(!is.na(unit_id), country %in% top3, host %in% mammal_hosts) |>
+  group_by(country, host) |>
+  summarize(cases = sum(cases), .groups = "drop") |>
+  group_by(country) |>
+  mutate(use_pct = 100 * cases / sum(cases)) |>
+  ungroup()
+
+# Availability: filter right after the host recode, before group_by()
+avail_df <- glw_all |>
+  select(-country) |>
+  inner_join(unit_country, by = "unit_id") |>
+  filter(country %in% top3) |>
+  mutate(host = unname(glw_xwalk[species])) |>
+  filter(host %in% mammal_hosts) |>
+  group_by(country, host) |>
+  summarize(abundance = sum(total_count, na.rm = TRUE), .groups = "drop") |>
+  group_by(country) |>
+  mutate(avail_pct = 100 * abundance / sum(abundance, na.rm = TRUE)) |>
+  ungroup()
+
+# Combine and plot (same as before)
+pref_df <- use_df |>
+  inner_join(avail_df, by = c("country", "host")) |>
+  mutate(pref_index = use_pct / avail_pct)
+
+ggplot(pref_df, aes(avail_pct, use_pct, label = host)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(shape = 1, size = 3) +
+  geom_text(vjust = -0.8, size = 3, check_overlap = TRUE) +
+  facet_wrap(~country) +
+  coord_equal(xlim = c(0, 100), ylim = c(0, 100)) +
+  labs(x = "Host availability (% of mammalian livestock in outbreak units)",
+       y = "Host use (% of mammal cases)") +
+  theme_bw()
+ggsave(here("output/figures/host_preference_mammals_top3.png"), width = 10, height = 4)
+
+#7. NWS Preference index bar charts--------------------
+# ISO3 lookup: NWS country names -> GLW codes
+iso_lookup <- c("MÉXICO" = "MEX", "NICARAGUA" = "NIC", "PANAMÁ" = "PAN")
+
+# Denominator: national abundance per host from GLW
+country_abund <- glw_all |>
+  filter(country %in% unname(iso_lookup[top3])) |>
+  mutate(host = unname(glw_xwalk[species])) |>
+  group_by(iso3 = country, host) |>
+  summarize(abundance = sum(total_count, na.rm = TRUE), .groups = "drop")
+
+# Numerator: cases per host and country, joined to the denominator
+use_rate <- nws_long |>
+  filter(country %in% top3) |>
+  group_by(country, host) |>
+  summarize(cases = sum(cases), .groups = "drop") |>
+  mutate(iso3 = unname(iso_lookup[country])) |>
+  inner_join(country_abund, by = c("iso3", "host")) |>
+  filter(abundance > 0, host != "Equine") |>   # Equine: 2010 data covers Panama only
+  mutate(use_pct = 100 * cases / abundance)
+
+plot_rate <- function(hosts, file, w = 8, h = 5) {
+  p <- use_rate |>
+    filter(host %in% hosts) |>
+    ggplot(aes(host, use_pct, fill = country)) +
+    geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+    labs(x = NULL, y = "% of host population with cases", fill = "Country") +
+    theme_bw()
+  ggsave(here("output/figures", file), p, width = w, height = h)
+  p
+}
+
+plot_rate(c("Swine", "Ovine", "Caprine", "Buffalo"), "rate_mammals_no_cattle.png")
+plot_rate("Livestock Birds", "rate_livestock_birds.png", w = 4)
+plot_rate("Bovine",          "rate_cattle.png",          w = 4)
+
+
